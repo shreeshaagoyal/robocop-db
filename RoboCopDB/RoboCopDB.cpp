@@ -5,6 +5,17 @@
 #include <fstream>
 #include <memory>
 
+template<typename T>
+void WriteToBuffer(std::vector<char>& buffer, const T& value);
+template<>
+void WriteToBuffer(std::vector<char>& buffer, const std::string& str);
+template<>
+void WriteToBuffer(std::vector<char>& buffer, const std::vector<char>& value);
+template<typename T>
+void WriteToFile(std::ofstream& ofs, const T& value);
+template<>
+void WriteToFile(std::ofstream& ofs, const std::vector<char>& value);
+
 // Datum interface
 struct Datum
 {
@@ -50,18 +61,8 @@ struct StringDatum : Datum
 	{
 		auto& _bin = const_cast<std::vector<char>&>(bin);
 		_bin.clear();
-
-		auto strSize = str.size();
-		for (int i = 0; i < sizeof(strSize); ++i)
-		{
-			_bin.push_back(reinterpret_cast<const char*>(&strSize)[i]);
-		}
-
-		for (int i = 0; i < strSize; ++i)
-		{
-			_bin.push_back(str[i]);
-		}
-
+		WriteToBuffer(_bin, str.size());
+		WriteToBuffer(_bin, str);
 		return bin;
 	}
 };
@@ -99,12 +100,7 @@ struct NumDatum : Datum
 	{
 		auto& _bin = const_cast<std::vector<char>&>(bin);
 		_bin.clear();
-
-		for (int i = 0; i < sizeof(num); ++i)
-		{
-			_bin.push_back(reinterpret_cast<const char*>(&num)[i]);
-		}
-
+		WriteToBuffer(_bin, num);
 		return bin;
 	}
 };
@@ -133,7 +129,7 @@ struct Entry
 		for (const auto& datum : data)
 		{
 			const auto& datumBin = datum->GetBinary();
-			_bin.insert(_bin.end(), datumBin.begin(), datumBin.end());
+			WriteToBuffer(_bin, datumBin);
 		}
 
 		return bin;
@@ -155,7 +151,7 @@ struct Table
 	{
 		std::sort(entries.begin(), entries.end(), [](const Entry& first, const Entry& second)
 		{
-			return *first.GetPrimaryKey() < *second.GetPrimaryKey();
+			return first.GetPrimaryKey()->GetHash() < second.GetPrimaryKey()->GetHash();
 		});
 		index.reserve(entries.size());
 		for (Entry& entry : entries)
@@ -176,34 +172,79 @@ struct Table
 		// Serialize index
 		for (auto* indexEntry : index)
 		{
-			auto hash = indexEntry->GetHash();
-			ofs.write(reinterpret_cast<char*>(&hash), sizeof(hash));
+			WriteToFile(ofs, indexEntry->GetHash());
+			WriteToFile(ofs, static_cast<uint64_t>(0));
 		}
 
 		// Serialize entries
 
-		// size of a vector in a single Entry
+		// number of columns in a single entry
 		// order of num/string Datums in a single Entry (e.g. {num,num,string})
 		// List of entries:
 		// If a Datum is a StringDatum, indicate the length before the actual string
 
 		const auto& cols = entries[0].data;
-		auto numCols = cols.size();
-		ofs.write(reinterpret_cast<char*>(&numCols), sizeof(numCols));
+		WriteToFile(ofs, cols.size());
 
 		for (const auto& col : cols)
 		{
-			auto type = col->GetType();
-			ofs.write(reinterpret_cast<char*>(&type), sizeof(type));
+			WriteToFile(ofs, col->GetType());
 		}
+
+		uint64_t entryIndex = 0;
 
 		for (const auto& entry : entries)
 		{
-			const auto& bytes = entry.GetBinary();
-			ofs.write(bytes.data(), bytes.size());
+			auto filePos = static_cast<uint64_t>(ofs.tellp());
+
+			{
+				// TODO remove magic numbers
+				ofs.seekp(entryIndex * 16 + 8);
+				WriteToFile(ofs, filePos);
+				ofs.seekp(filePos);
+			}
+
+			WriteToFile(ofs, entry.GetBinary());
+			++entryIndex;
 		}
 	}
 };
+
+template<typename T>
+void WriteToBuffer(std::vector<char>& buffer, const T& value)
+{
+	for (int i = 0; i < sizeof(value); ++i)
+	{
+		buffer.push_back(reinterpret_cast<const char*>(&value)[i]);
+	}
+}
+
+template<>
+void WriteToBuffer(std::vector<char>& buffer, const std::string& str)
+{
+	for (int i = 0; i < str.size(); ++i)
+	{
+		buffer.push_back(str[i]);
+	}
+}
+
+template<>
+void WriteToBuffer(std::vector<char>& buffer, const std::vector<char>& value)
+{
+	buffer.insert(buffer.end(), value.begin(), value.end());
+}
+
+template<typename T>
+void WriteToFile(std::ofstream& ofs, const T& value)
+{
+	ofs.write(reinterpret_cast<char*>(&(const_cast<T&>(value))), sizeof(value));
+}
+
+template<>
+void WriteToFile(std::ofstream& ofs, const std::vector<char>& value)
+{
+	ofs.write(value.data(), value.size());
+}
 
 int main()
 {
